@@ -41,8 +41,8 @@ case $choice in
     echo "sk5 主程序已安装到 /usr/local/bin/sk5"
 
     # ========== 2. 内核网络优化（适合长时间打游戏） ==========
-    SOCKS_USER="one99"
-    SOCKS_PASS="one99"
+    SOCKS_USER="FaCai"
+    SOCKS_PASS="One99"
 
     add_sysctl_if_missing() {
         local key="$1" value="$2"
