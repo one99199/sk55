@@ -1,13 +1,13 @@
 #!/bin/bash
 
 echo "###############################################################"
-echo "#           欢迎使用多IP一键安装脚本                         #"
+echo "#           RK多IP一键安装脚本                         #"
 echo "#           脚本支持系统: CentOS 7+                          #"
 echo "###############################################################"
 echo ""
 echo "请选择操作："
-echo "1. IP 网卡配置绑定（多 IP 服务器使用，需搭配 ip.txt 文件）"
-echo "2. 安装/配置 sk5 多 IP SOCKS5（游戏优化版）"
+echo "1. IP 网卡配置绑定（多IP服务器使用，需搭配 ip.txt 文件）"
+echo "2. 安装/配置 sk5 多IP SOCKS5（游戏优化版）"
 echo "3. 安装 l2tp"
 read -p "请输入选项 (1/2/3): " choice
 
@@ -16,8 +16,8 @@ case $choice in
     echo "======================================================="
     echo "【第 1 步：绑定内网 IP 对应公网 IP】"
     echo "本步骤会下载并运行 bind.sh，实际绑定逻辑在 bind.sh 里完成。"
-    echo "绑定脚本会使用 ip.txt 文件，请按照 bind.sh 的提示把【公网 IP】"
-    echo "写入 ip.txt（通常在 /root/ip.txt 或脚本当前目录）。"
+    echo "bind.sh 会使用 ip.txt 文件，请根据 bind.sh 提示，把【公网 IP】"
+    echo "写入 ip.txt（通常在 /root/ip.txt 或当前目录）。"
     echo "======================================================="
     echo ""
     echo "正在下载并运行 IP 网卡配置绑定脚本 bind.sh..."
@@ -88,7 +88,7 @@ case $choice in
     sysctl -p >/dev/null 2>&1 || true
     echo "内核网络参数优化完成。"
 
-    # ========== 3. 从 ip.txt 读取公网 IP ==========
+    # ========== 3. 从 /root/ip.txt 读取公网 IP ==========
     IP_FILE="/root/ip.txt"
     if [ ! -f "$IP_FILE" ]; then
         echo "未找到 $IP_FILE，请创建文件并每行写一个公网 IP，例如："
@@ -98,7 +98,9 @@ case $choice in
         exit 1
     fi
 
-    mapfile -t pub_ips < <(grep -vE '^\s*#|^\s*$' "$IP_FILE")
+    # 去掉 \r，过滤注释和空行
+    mapfile -t pub_ips < <(sed 's/\r$//' "$IP_FILE" | grep -vE '^\s*#|^\s*$')
+
     if [ ${#pub_ips[@]} -eq 0 ]; then
         echo "$IP_FILE 中没有有效公网 IP，每行写一个，例如：8.218.210.30"
         exit 1
@@ -114,6 +116,7 @@ case $choice in
 
     # ========== 4. 生成一个统一端口（>10000，三个 IP 共用） ==========
     random_port() {
+        # 20000–65000 之间随机
         echo $((20000 + RANDOM % 45000))
     }
     PORT=$(random_port)
@@ -193,6 +196,7 @@ EOF
     done
     echo "======================================================="
     ;;
+
 3)
     echo "正在安装 l2tp..."
     L2TP_SCRIPT_URL="https://github.com/55620/bot/raw/refs/heads/main/bangdingip/1.sh"
