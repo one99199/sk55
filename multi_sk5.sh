@@ -1,7 +1,7 @@
 #!/bin/bash
 
 echo "###############################################################"
-echo "#           RK多IP一键安装脚本                         #"
+echo "#           欢迎使用多IP一键安装脚本                         #"
 echo "#           脚本支持系统: CentOS 7+                          #"
 echo "###############################################################"
 echo ""
@@ -16,8 +16,6 @@ case $choice in
     echo "======================================================="
     echo "【第 1 步：绑定内网 IP 对应公网 IP】"
     echo "本步骤会下载并运行 bind.sh，实际绑定逻辑在 bind.sh 里完成。"
-    echo "bind.sh 会使用 ip.txt 文件，请根据 bind.sh 提示，把【公网 IP】"
-    echo "写入 ip.txt（通常在 /root/ip.txt 或当前目录）。"
     echo "======================================================="
     echo ""
     echo "正在下载并运行 IP 网卡配置绑定脚本 bind.sh..."
@@ -25,13 +23,43 @@ case $choice in
     wget -O bind.sh "$BIND_SCRIPT_URL"
     if [[ $? -eq 0 ]]; then
         chmod +x bind.sh
-        echo "运行 bind.sh 脚本中，请根据脚本提示填写 ip.txt 里的公网 IP ..."
+        echo "运行 bind.sh 脚本中，请根据脚本提示完成网卡/IP 绑定..."
         ./bind.sh
         echo "IP 网卡配置绑定脚本运行完成！"
-        echo "如需修改公网 IP，请重新编辑 bind.sh 同目录下的 ip.txt，然后再运行本脚本第 2 项。"
     else
         echo "下载 bind.sh 失败，请检查下载链接是否正确！"
     fi
+
+    # ======= 自动生成 /root/ip.txt 模板 =======
+    IP_FILE="/root/ip.txt"
+    echo "正在生成 /root/ip.txt 公网 IP 配置模板..."
+
+    cat > "$IP_FILE" << 'EOF'
+# 每行填写一个【公网 IP】，不要带端口、不要带空格，例如：
+# 8.218.210.30
+# 47.242.93.101
+# 8.217.2.105
+#
+# 最多写 3 行，多于 3 行只会取前 3 个。
+#
+# 填写完毕后，请运行:
+#   ./multi_sk5.sh
+# 选择 2 安装/配置 sk5 多IP SOCKS5。
+EOF
+
+    # 在文件最后附上当前检测到的本机 IP（仅供参考，通常是内网 IP）
+    {
+        echo ""
+        echo "# 当前检测到的本机 IP（一般是内网 IP，仅作参考，不一定是公网）："
+        hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^127\.' | grep -v '^$' | sort -u | sed 's/^/# /'
+    } >> "$IP_FILE"
+
+    echo "已生成 /root/ip.txt，请用你自己的【公网 IP】覆盖文件中的示例行。"
+    echo "示例："
+    echo "  8.218.210.30"
+    echo "  47.242.93.101"
+    echo "  8.217.2.105"
+    echo "然后运行 ./multi_sk5.sh 选择 2 完成 Socks5 安装。"
     ;;
 
 2)
@@ -91,7 +119,8 @@ case $choice in
     # ========== 3. 从 /root/ip.txt 读取公网 IP ==========
     IP_FILE="/root/ip.txt"
     if [ ! -f "$IP_FILE" ]; then
-        echo "未找到 $IP_FILE，请创建文件并每行写一个公网 IP，例如："
+        echo "未找到 $IP_FILE，请先运行选项 1，或手动创建 /root/ip.txt："
+        echo "每行写一个公网 IP，例如："
         echo "8.218.210.30"
         echo "47.242.93.101"
         echo "8.217.2.105"
