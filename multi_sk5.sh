@@ -35,7 +35,7 @@ case $choice in
     ;;
 
 2)
-    echo "正在安装/配置 sk5（游戏优化版，多 IP SOCKS5）..."
+    echo "正在安装/配置 sk5（游戏优化版，多IP SOCKS5）..."
 
     # ========== 1. 安装 sk5 主程序 ==========
     SK5_FILE_URL="https://github.com/55620/bot/raw/refs/heads/main/bangdingip/sk5"
@@ -79,7 +79,7 @@ case $choice in
     add_sysctl_if_missing "net.ipv4.tcp_keepalive_intvl" "75"
     add_sysctl_if_missing "net.ipv4.tcp_keepalive_probes" "9"
 
-    # BBR（如果内核支持就打开，不支持就跳过）
+    # BBR（如果内核支持就打开）
     if sysctl net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -q bbr; then
         add_sysctl_if_missing "net.core.default_qdisc" "fq"
         add_sysctl_if_missing "net.ipv4.tcp_congestion_control" "bbr"
@@ -88,47 +88,36 @@ case $choice in
     sysctl -p >/dev/null 2>&1 || true
     echo "内核网络参数优化完成。"
 
-    # ========== 3. 获取本机 IP（多网卡 / 多 IP） ==========
-    # 这里会拿到经过 bind.sh 绑定后的本机 IP，一般就是你的公网 IP
-    mapfile -t ips < <(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^127\.' | grep -v '^$' | sort -u)
-
-    if [ ${#ips[@]} -eq 0 ]; then
-        echo "未检测到任何有效 IP，退出。"
+    # ========== 3. 从 ip.txt 读取公网 IP ==========
+    IP_FILE="/root/ip.txt"
+    if [ ! -f "$IP_FILE" ]; then
+        echo "未找到 $IP_FILE，请创建文件并每行写一个公网 IP，例如："
+        echo "8.218.210.30"
+        echo "47.242.93.101"
+        echo "8.217.2.105"
         exit 1
     fi
 
-    echo "检测到本机 IP 列表：${ips[*]}"
-
-    # 最多只使用前 3 个 IP（你是 3 个公网 IP 的场景）
-    if [ ${#ips[@]} -gt 3 ]; then
-        echo "提示：检测到 ${#ips[@]} 个 IP，仅使用前 3 个：${ips[@]:0:3}"
-        ips=("${ips[@]:0:3}")
+    mapfile -t pub_ips < <(grep -vE '^\s*#|^\s*$' "$IP_FILE")
+    if [ ${#pub_ips[@]} -eq 0 ]; then
+        echo "$IP_FILE 中没有有效公网 IP，每行写一个，例如：8.218.210.30"
+        exit 1
     fi
 
-    # ========== 4. 为每个 IP 生成不重复的随机端口 ==========
+    # 只取前 3 个公网 IP
+    if [ ${#pub_ips[@]} -gt 3 ]; then
+        echo "提示：ip.txt 中有 ${#pub_ips[@]} 个 IP，仅使用前 3 个：${pub_ips[@]:0:3}"
+        pub_ips=("${pub_ips[@]:0:3}")
+    fi
+
+    echo "将为以下公网 IP 生成 Socks5：${pub_ips[*]}"
+
+    # ========== 4. 生成一个统一端口（>10000，三个 IP 共用） ==========
     random_port() {
-        # 20000–65000 之间随机（>10000 符合你要求）
         echo $((20000 + RANDOM % 45000))
     }
-
-    declare -A IP_PORT
-    USED_PORTS=()
-
-    for ip in "${ips[@]}"; do
-        while true; do
-            port=$(random_port)
-            used=0
-            for p in "${USED_PORTS[@]}"; do
-                if [ "$p" = "$port" ]; then
-                    used=1
-                    break
-                fi
-            done
-            [ $used -eq 0 ] && break
-        done
-        IP_PORT["$ip"]=$port
-        USED_PORTS+=("$port")
-    done
+    PORT=$(random_port)
+    echo "本次统一使用端口：$PORT"
 
     # ========== 5. 写 systemd 服务 ==========
     cat >/etc/systemd/system/sk5.service <<EOF
@@ -150,53 +139,39 @@ EOF
     systemctl daemon-reload
     systemctl enable sk5 >/dev/null 2>&1 || true
 
-    # ========== 6. 生成 sk5 配置（每个 IP 一条 SOCKS5，支持 UDP） ==========
+    # ========== 6. 生成 sk5 配置（监听 0.0.0.0:PORT，支持 UDP） ==========
     mkdir -p /etc/sk5
-    : > /etc/sk5/serve.toml
-
-    idx=0
-    for ip in "${ips[@]}"; do
-        idx=$((idx + 1))
-        port="${IP_PORT[$ip]}"
-
-        cat >> /etc/sk5/serve.toml <<EOF
+    cat >/etc/sk5/serve.toml <<EOF
 [[inbounds]]
-listen = "$ip"
-port = $port
+listen = "0.0.0.0"
+port = $PORT
 protocol = "socks"
-tag = "in-$idx"
+tag = "in-1"
 
 [inbounds.settings]
 auth = "password"
 udp = true
-ip = "$ip"
 
 [[inbounds.settings.accounts]]
 user = "$SOCKS_USER"
 pass = "$SOCKS_PASS"
 
+[[outbounds]]
+protocol = "freedom"
+tag = "out-1"
+
 [[routing.rules]]
 type = "field"
-inboundTag = "in-$idx"
-outboundTag = "out-$idx"
-
-[[outbounds]]
-sendThrough = "$ip"
-protocol = "freedom"
-tag = "out-$idx"
-
+inboundTag = "in-1"
+outboundTag = "out-1"
 EOF
-    done
 
-    # ========== 7. iptables 放行端口（TCP+UDP） ==========
-    for ip in "${ips[@]}"; do
-        port="${IP_PORT[$ip]}"
-        iptables -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || \
-        iptables -A INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || true
+    # ========== 7. iptables 放行统一端口（TCP+UDP） ==========
+    iptables -C INPUT -p tcp --dport "$PORT" -j ACCEPT 2>/dev/null || \
+    iptables -A INPUT -p tcp --dport "$PORT" -j ACCEPT 2>/dev/null || true
 
-        iptables -C INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || \
-        iptables -A INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true
-    done
+    iptables -C INPUT -p udp --dport "$PORT" -j ACCEPT 2>/dev/null || \
+    iptables -A INPUT -p udp --dport "$PORT" -j ACCEPT 2>/dev/null || true
 
     # ========== 8. 启动 sk5 服务 ==========
     systemctl stop sk5 >/dev/null 2>&1 || true
@@ -209,16 +184,15 @@ EOF
         echo "警告：sk5 服务未成功启动，请用 'systemctl status sk5' 查看原因。"
     fi
 
-    # ========== 9. 最终输出：IP|端口|用户名|密码 ==========
+    # ========== 9. 最终输出：公网IP|统一端口|FaCai|One99 ==========
     echo ""
     echo "=========== SOCKS5 列表（用于游戏加速 / 挂机）==========="
     echo "格式：IP|端口|用户名|密码"
-    for ip in "${ips[@]}"; do
-        echo "$ip|${IP_PORT[$ip]}|$SOCKS_USER|$SOCKS_PASS"
+    for ip in "${pub_ips[@]}"; do
+        echo "$ip|$PORT|$SOCKS_USER|$SOCKS_PASS"
     done
     echo "======================================================="
     ;;
-
 3)
     echo "正在安装 l2tp..."
     L2TP_SCRIPT_URL="https://github.com/55620/bot/raw/refs/heads/main/bangdingip/1.sh"
