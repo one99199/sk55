@@ -96,7 +96,8 @@ EOF
  # 检查并清理端口占用
  echo "检查端口占用情况..."
  if command -v ss >/dev/null 2>&1; then
- for port in 40000 50000 48664 21359 1080 10808; do
+ for port in 40000 50000 48664 21359 1080 10808
+ do
  OCCUPIED=$(ss -tulnp 2>/dev/null | grep ":$port " || true)
  if [ -n "$OCCUPIED" ]; then
  echo "发现端口 $port 被占用，正在清理..."
@@ -106,8 +107,10 @@ EOF
  fi
  fi
  done
- elif command -v netstat >/dev/null 2>&1; then
- for port in 40000 50000 48664 21359 1080 10808; do
+ else
+ if command -v netstat >/dev/null 2>&1; then
+ for port in 40000 50000 48664 21359 1080 10808
+ do
  OCCUPIED=$(netstat -tulnp 2>/dev/null | grep ":$port " || true)
  if [ -n "$OCCUPIED" ]; then
  echo "发现端口 $port 被占用，正在清理..."
@@ -117,6 +120,7 @@ EOF
  fi
  fi
  done
+ fi
  fi
  
  sleep 2
