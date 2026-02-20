@@ -201,6 +201,8 @@ EOF
 
  # ========== 6. 生成 sk5 配置（监听 0.0.0.0:PORT，支持 UDP，修复：确保绑定所有IP） ==========
  mkdir -p /etc/sk5
+ 
+ # 尝试使用TOML格式（sk5可能支持）
  cat >/etc/sk5/serve.toml <<EOF
 [server]
 listen = "0.0.0.0:$PORT"
@@ -213,6 +215,24 @@ EOF
  echo "sk5 配置文件已生成：/etc/sk5/serve.toml"
  echo "配置内容："
  cat /etc/sk5/serve.toml
+ echo ""
+ 
+ # 验证配置文件是否存在且可读
+ if [ ! -f /etc/sk5/serve.toml ]; then
+ echo "错误：配置文件创建失败！"
+ exit 1
+ fi
+ 
+ # 验证配置文件中是否包含正确的端口
+ if ! grep -q "listen = \"0.0.0.0:$PORT\"" /etc/sk5/serve.toml; then
+ echo "警告：配置文件中端口可能不正确，请检查！"
+ fi
+ 
+ # 验证配置文件格式（检查基本语法）
+ if ! grep -q "\[server\]" /etc/sk5/serve.toml || ! grep -q "listen" /etc/sk5/serve.toml; then
+ echo "错误：配置文件格式不正确！"
+ exit 1
+ fi
 
  # ========== 7. 防火墙规则（完整配置，确保规则正确添加和持久化） ==========
  echo "=========================================="
@@ -357,13 +377,24 @@ EOF
  echo "防火墙规则配置完成"
  echo "=========================================="
 
- # ========== 8. 启动 sk5 服务（修复：增加启动检查和重试） ==========
+ # ========== 8. 启动 sk5 服务（修复：增加启动检查和重试，多次检查端口监听） ==========
+ echo "停止旧服务（如果存在）..."
  systemctl stop sk5 >/dev/null 2>&1 || true
  sleep 2
+
+ echo "启动 sk5 服务..."
  systemctl start sk5
 
- echo "等待服务启动..."
- sleep 3
+ echo "等待服务启动（最多等待10秒）..."
+ 
+ # 等待服务启动，最多等待10秒
+ for i in {1..10}; do
+ if systemctl is-active --quiet sk5; then
+ echo "✓ sk5 服务进程已启动（等待 $i 秒）"
+ break
+ fi
+ sleep 1
+ done
 
  # 检查服务状态
  if systemctl is-active --quiet sk5; then
@@ -373,16 +404,80 @@ EOF
  systemctl status sk5 --no-pager -l
  echo ""
  echo "尝试查看详细错误："
- journalctl -u sk5 -n 20 --no-pager
+ journalctl -u sk5 -n 30 --no-pager
  exit 1
  fi
 
- # 检查端口监听
+ # 等待端口监听（最多等待15秒）
+ echo "等待端口 $PORT 开始监听（最多等待15秒）..."
+ port_listening=false
+ for i in {1..15}; do
+ if command -v ss >/dev/null 2>&1; then
+ if ss -tuln | grep -q ":$PORT "; then
+ echo "✓ 端口 $PORT 已开始监听（等待 $i 秒）"
+ port_listening=true
+ break
+ fi
+ elif command -v netstat >/dev/null 2>&1; then
+ if netstat -tuln | grep -q ":$PORT "; then
+ echo "✓ 端口 $PORT 已开始监听（等待 $i 秒）"
+ port_listening=true
+ break
+ fi
+ fi
+ sleep 1
+ done
+
+ # 最终检查端口监听状态
+ echo ""
  echo "检查端口监听状态..."
- if command -v netstat >/dev/null 2>&1; then
- netstat -tuln | grep ":$PORT " || echo "警告：未检测到端口 $PORT 监听"
- elif command -v ss >/dev/null 2>&1; then
- ss -tuln | grep ":$PORT " || echo "警告：未检测到端口 $PORT 监听"
+ if command -v ss >/dev/null 2>&1; then
+ if ss -tuln | grep ":$PORT "; then
+ echo "✓ 端口 $PORT 正在监听"
+ port_listening=true
+ else
+ echo "✗ 警告：未检测到端口 $PORT 监听"
+ echo "正在检查服务日志..."
+ journalctl -u sk5 -n 20 --no-pager | tail -10
+ fi
+ elif command -v netstat >/dev/null 2>&1; then
+ if netstat -tuln | grep ":$PORT "; then
+ echo "✓ 端口 $PORT 正在监听"
+ port_listening=true
+ else
+ echo "✗ 警告：未检测到端口 $PORT 监听"
+ echo "正在检查服务日志..."
+ journalctl -u sk5 -n 20 --no-pager | tail -10
+ fi
+ fi
+
+ # 如果端口未监听，显示诊断信息
+ if [ "$port_listening" = false ]; then
+ echo ""
+ echo "=========================================="
+ echo "诊断信息："
+ echo "=========================================="
+ echo "1. 检查配置文件："
+ cat /etc/sk5/serve.toml
+ echo ""
+ echo "2. 检查服务状态："
+ systemctl status sk5 --no-pager -l | head -20
+ echo ""
+ echo "3. 检查进程："
+ ps aux | grep -E "sk5|xray" | grep -v grep || echo "未找到sk5进程"
+ echo ""
+ echo "4. 检查所有监听端口："
+ if command -v ss >/dev/null 2>&1; then
+ ss -tuln | head -20
+ else
+ netstat -tuln | head -20
+ fi
+ echo ""
+ echo "如果端口仍未监听，请手动检查："
+ echo "  - 配置文件格式是否正确：cat /etc/sk5/serve.toml"
+ echo "  - 服务日志：journalctl -u sk5 -f"
+ echo "  - sk5程序是否支持该配置格式"
+ echo "=========================================="
  fi
 
  # ========== 9. 测试每个IP的连通性 ==========
