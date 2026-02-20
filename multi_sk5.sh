@@ -143,55 +143,45 @@ EOF
 
  echo "将为以下公网 IP 生成 Socks5：${pub_ips[*]}"
 
- # ========== 4. 生成随机端口（40000-65000，范围25000个端口） ==========
- random_port() {
- # 40000-65000 之间随机，共25000个端口可选
- echo $((40000 + RANDOM % 25000))
- }
+ # ========== 4. 使用固定端口 48664 ==========
+ PORT=48664
+ echo "使用固定端口：$PORT"
 
  # 检查端口是否被占用
- check_port_available() {
- local port=$1
- if command -v netstat >/dev/null 2>&1; then
- netstat -tuln | grep -q ":$port " && return 1
- elif command -v ss >/dev/null 2>&1; then
- ss -tuln | grep -q ":$port " && return 1
+ if command -v ss >/dev/null 2>&1; then
+ if ss -tuln | grep -q ":$PORT "; then
+ echo "警告：端口 $PORT 已被占用，正在检查占用进程..."
+ OCCUPIED_PROC=$(ss -tulnp | grep ":$PORT ")
+ echo "$OCCUPIED_PROC"
+ echo "请手动释放该端口或修改脚本中的PORT变量"
  fi
- return 0
- }
-
- # 生成随机端口，如果被占用则重新生成（最多尝试20次）
- PORT=$(random_port)
- max_attempts=20
- attempt=0
- while ! check_port_available "$PORT" && [ $attempt -lt $max_attempts ]; do
- echo "端口 $PORT 已被占用，重新生成随机端口..."
- PORT=$(random_port)
- attempt=$((attempt + 1))
- done
-
- if [ $attempt -eq $max_attempts ]; then
- echo "警告：尝试 $max_attempts 次后仍无法找到可用端口，使用端口：$PORT"
- echo "如果端口被占用，请手动检查或释放该端口"
- else
- echo "使用随机端口：$PORT（40000-65000范围，共25000个端口可选）"
+ elif command -v netstat >/dev/null 2>&1; then
+ if netstat -tuln | grep -q ":$PORT "; then
+ echo "警告：端口 $PORT 已被占用，正在检查占用进程..."
+ OCCUPIED_PROC=$(netstat -tulnp | grep ":$PORT ")
+ echo "$OCCUPIED_PROC"
+ echo "请手动释放该端口或修改脚本中的PORT变量"
+ fi
  fi
 
  # ========== 5. 写 systemd 服务（修复：确保服务正确启动，支持多种配置格式） ==========
- # 创建启动脚本，自动检测可用的配置格式
+ # 创建启动脚本，优先使用JSON格式（Xray标准格式）
  cat >/usr/local/bin/sk5-start.sh <<'SK5START'
 #!/bin/bash
-CONFIG_TOML="/etc/sk5/serve.toml"
 CONFIG_JSON="/etc/sk5/config.json"
+CONFIG_TOML="/etc/sk5/serve.toml"
 
-# 优先尝试TOML格式
-if [ -f "$CONFIG_TOML" ]; then
-    /usr/local/bin/sk5 -c "$CONFIG_TOML"
-# 如果TOML不存在，尝试JSON格式
-elif [ -f "$CONFIG_JSON" ]; then
+# 优先使用JSON格式（Xray标准格式，更可靠）
+if [ -f "$CONFIG_JSON" ]; then
+    echo "使用JSON配置文件：$CONFIG_JSON"
     /usr/local/bin/sk5 -c "$CONFIG_JSON"
+# 如果JSON不存在，尝试TOML格式
+elif [ -f "$CONFIG_TOML" ]; then
+    echo "使用TOML配置文件：$CONFIG_TOML"
+    /usr/local/bin/sk5 -c "$CONFIG_TOML"
 else
     echo "错误：未找到配置文件！"
+    echo "请检查 /etc/sk5/ 目录"
     exit 1
 fi
 SK5START
@@ -219,20 +209,10 @@ EOF
  systemctl daemon-reload
  echo "systemd 服务配置已更新（支持自动检测配置格式）。"
 
- # ========== 6. 生成 sk5 配置（使用Xray标准JSON格式，确保端口正确监听） ==========
+ # ========== 6. 生成 sk5 配置（优先使用JSON格式，确保端口正确监听） ==========
  mkdir -p /etc/sk5
  
- # 首先尝试TOML格式（如果sk5支持）
- cat >/etc/sk5/serve.toml <<EOF
-[server]
-listen = "0.0.0.0:$PORT"
-udp_enable = true
-
-[users]
-"$SOCKS_USER" = "$SOCKS_PASS"
-EOF
-
- # 同时创建Xray标准JSON格式配置（作为备用）
+ # 创建Xray标准JSON格式配置（主要配置）
  cat >/etc/sk5/config.json <<EOF
 {
   "log": {
@@ -258,45 +238,74 @@ EOF
   ],
   "outbounds": [
     {
-      "protocol": "freedom"
+      "protocol": "freedom",
+      "settings": {}
     }
   ]
 }
 EOF
 
+ # 同时创建TOML格式（作为备用）
+ cat >/etc/sk5/serve.toml <<EOF
+[server]
+listen = "0.0.0.0:$PORT"
+udp_enable = true
+
+[users]
+"$SOCKS_USER" = "$SOCKS_PASS"
+EOF
+
  echo "sk5 配置文件已生成："
- echo "1. TOML格式：/etc/sk5/serve.toml"
- echo "2. JSON格式：/etc/sk5/config.json"
- echo ""
- echo "TOML配置内容："
- cat /etc/sk5/serve.toml
+ echo "1. JSON格式（主要）：/etc/sk5/config.json"
+ echo "2. TOML格式（备用）：/etc/sk5/serve.toml"
  echo ""
  echo "JSON配置内容："
  cat /etc/sk5/config.json
  echo ""
+ echo "TOML配置内容："
+ cat /etc/sk5/serve.toml
+ echo ""
  
  # 验证配置文件是否存在且可读
- if [ ! -f /etc/sk5/serve.toml ]; then
- echo "错误：TOML配置文件创建失败！"
- exit 1
- fi
- 
  if [ ! -f /etc/sk5/config.json ]; then
  echo "错误：JSON配置文件创建失败！"
  exit 1
  fi
  
- # 验证配置文件中是否包含正确的端口
- if ! grep -q "listen = \"0.0.0.0:$PORT\"" /etc/sk5/serve.toml && ! grep -q "\"port\": $PORT" /etc/sk5/config.json; then
- echo "警告：配置文件中端口可能不正确，请检查！"
+ if [ ! -f /etc/sk5/serve.toml ]; then
+ echo "警告：TOML配置文件创建失败！"
  fi
  
  # 验证JSON格式是否正确
  if command -v python3 >/dev/null 2>&1; then
- if ! python3 -m json.tool /etc/sk5/config.json >/dev/null 2>&1; then
- echo "警告：JSON配置文件格式可能不正确！"
+ if python3 -m json.tool /etc/sk5/config.json >/dev/null 2>&1; then
+ echo "✓ JSON配置文件格式验证通过"
+ else
+ echo "✗ 错误：JSON配置文件格式不正确！"
+ exit 1
  fi
+ elif command -v python >/dev/null 2>&1; then
+ if python -m json.tool /etc/sk5/config.json >/dev/null 2>&1; then
+ echo "✓ JSON配置文件格式验证通过"
+ else
+ echo "✗ 错误：JSON配置文件格式不正确！"
+ exit 1
  fi
+ else
+ echo "⚠ 无法验证JSON格式（未安装python），请手动检查"
+ fi
+ 
+ # 验证配置文件中是否包含正确的端口
+ if ! grep -q "\"port\": $PORT" /etc/sk5/config.json; then
+ echo "✗ 错误：JSON配置文件中端口不正确！"
+ exit 1
+ fi
+ 
+ if ! grep -q "listen = \"0.0.0.0:$PORT\"" /etc/sk5/serve.toml; then
+ echo "⚠ 警告：TOML配置文件中端口可能不正确"
+ fi
+ 
+ echo "✓ 配置文件验证完成"
 
  # ========== 7. 防火墙规则（完整配置，确保规则正确添加和持久化） ==========
  echo "=========================================="
@@ -474,14 +483,14 @@ EOF
  fi
  fi
 
- echo "启动 sk5 服务..."
+ echo "启动 sk5 服务（使用JSON配置）..."
  systemctl start sk5
 
- echo "等待服务启动（最多等待15秒）..."
+ echo "等待服务启动（最多等待20秒）..."
  
- # 等待服务启动，最多等待15秒
+ # 等待服务启动，最多等待20秒
  service_started=false
- for i in {1..15}; do
+ for i in {1..20}; do
  if systemctl is-active --quiet sk5; then
  echo "✓ sk5 服务进程已启动（等待 $i 秒）"
  service_started=true
@@ -493,46 +502,65 @@ EOF
  # 检查服务状态
  if [ "$service_started" = true ]; then
  echo "✓ sk5 服务已成功启动"
+ 
+ # 检查进程是否真的在运行
+ if pgrep -f "sk5.*config.json" >/dev/null 2>&1 || pgrep -f "sk5.*serve.toml" >/dev/null 2>&1; then
+ echo "✓ sk5 进程确认运行中"
+ else
+ echo "⚠ 警告：systemd显示服务运行，但未找到sk5进程"
+ fi
  else
  echo "✗ sk5 服务启动失败，查看日志："
  systemctl status sk5 --no-pager -l | head -30
  echo ""
  echo "最近的服务日志："
- journalctl -u sk5 -n 30 --no-pager
+ journalctl -u sk5 -n 50 --no-pager | tail -30
  echo ""
- echo "尝试使用JSON配置格式重启..."
- # 尝试使用JSON配置
- if [ -f /etc/sk5/config.json ]; then
- echo "修改systemd服务使用JSON配置..."
- sed -i 's|ExecStart=.*|ExecStart=/usr/local/bin/sk5 -c /etc/sk5/config.json|' /etc/systemd/system/sk5.service
- systemctl daemon-reload
- systemctl restart sk5
- sleep 5
- if systemctl is-active --quiet sk5; then
- echo "✓ 使用JSON配置后服务启动成功"
- service_started=true
- else
- echo "✗ 使用JSON配置后服务仍启动失败"
- fi
+ echo "尝试手动测试sk5程序..."
+ 
+ # 尝试手动运行sk5测试配置
+ if [ -f /usr/local/bin/sk5 ]; then
+ echo "测试JSON配置："
+ timeout 3 /usr/local/bin/sk5 -c /etc/sk5/config.json -test 2>&1 | head -10 || \
+ timeout 3 /usr/local/bin/sk5 -c /etc/sk5/config.json 2>&1 | head -10 &
+ TEST_PID=$!
+ sleep 2
+ kill $TEST_PID 2>/dev/null || true
  fi
  fi
 
- # 等待端口监听（最多等待20秒）
+ # 等待端口监听（最多等待30秒，因为服务可能需要时间初始化）
  echo ""
- echo "等待端口 $PORT 开始监听（最多等待20秒）..."
+ echo "等待端口 $PORT 开始监听（最多等待30秒）..."
  port_listening=false
- for i in {1..20}; do
+ for i in {1..30}; do
  if command -v ss >/dev/null 2>&1; then
- if ss -tulnp | grep -q ":$PORT " && ss -tulnp | grep ":$PORT " | grep -qE "sk5|xray"; then
+ PORT_CHECK=$(ss -tulnp | grep ":$PORT ")
+ if [ -n "$PORT_CHECK" ]; then
+ # 检查是否是sk5或xray进程
+ if echo "$PORT_CHECK" | grep -qE "sk5|xray"; then
  echo "✓ 端口 $PORT 已开始监听（等待 $i 秒）"
+ echo "  监听信息：$PORT_CHECK"
  port_listening=true
  break
+ else
+ # 即使不是sk5进程，也显示端口被占用
+ echo "⚠ 端口 $PORT 被占用，但不是sk5进程（等待 $i 秒）"
+ echo "  占用信息：$PORT_CHECK"
+ fi
  fi
  elif command -v netstat >/dev/null 2>&1; then
- if netstat -tulnp | grep -q ":$PORT " && netstat -tulnp | grep ":$PORT " | grep -qE "sk5|xray"; then
+ PORT_CHECK=$(netstat -tulnp | grep ":$PORT ")
+ if [ -n "$PORT_CHECK" ]; then
+ if echo "$PORT_CHECK" | grep -qE "sk5|xray"; then
  echo "✓ 端口 $PORT 已开始监听（等待 $i 秒）"
+ echo "  监听信息：$PORT_CHECK"
  port_listening=true
  break
+ else
+ echo "⚠ 端口 $PORT 被占用，但不是sk5进程（等待 $i 秒）"
+ echo "  占用信息：$PORT_CHECK"
+ fi
  fi
  fi
  sleep 1
@@ -597,11 +625,24 @@ EOF
  echo "=========================================="
  echo "建议的修复步骤："
  echo "=========================================="
- echo "1. 检查sk5程序是否支持当前配置格式"
- echo "2. 尝试手动运行：/usr/local/bin/sk5 -c /etc/sk5/serve.toml"
- echo "3. 或尝试：/usr/local/bin/sk5 -c /etc/sk5/config.json"
- echo "4. 查看详细日志：journalctl -u sk5 -f"
- echo "5. 检查sk5程序版本和帮助：/usr/local/bin/sk5 --help"
+ echo "1. 检查sk5程序是否支持JSON配置格式："
+ echo "   /usr/local/bin/sk5 --help"
+ echo ""
+ echo "2. 尝试手动运行JSON配置（前台运行，查看输出）："
+ echo "   /usr/local/bin/sk5 -c /etc/sk5/config.json"
+ echo ""
+ echo "3. 如果JSON格式不支持，尝试TOML格式："
+ echo "   /usr/local/bin/sk5 -c /etc/sk5/serve.toml"
+ echo ""
+ echo "4. 查看实时服务日志："
+ echo "   journalctl -u sk5 -f"
+ echo ""
+ echo "5. 检查配置文件中的端口是否正确："
+ echo "   grep -E 'port|PORT' /etc/sk5/config.json"
+ echo ""
+ echo "6. 如果sk5不支持JSON，可能需要修改启动脚本使用TOML："
+ echo "   vi /usr/local/bin/sk5-start.sh"
+ echo "   将JSON和TOML的顺序调换"
  echo "=========================================="
  else
  echo ""
