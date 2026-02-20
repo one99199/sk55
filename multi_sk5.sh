@@ -65,6 +65,52 @@ EOF
 2)
  echo "正在安装/配置 sk5（游戏优化版，多IP SOCKS5）..."
 
+ # ========== 0. 停止所有旧的socks5相关服务 ==========
+ echo "=========================================="
+ echo "停止所有旧的socks5服务"
+ echo "=========================================="
+ 
+ # 停止sk5服务
+ if systemctl list-units --type=service | grep -q "sk5.service"; then
+ echo "停止 sk5 服务..."
+ systemctl stop sk5 2>/dev/null || true
+ systemctl disable sk5 2>/dev/null || true
+ fi
+ 
+ # 停止其他可能的socks5服务
+ for service in socks5 xray v2ray trojan shadowsocks ss-redir; do
+ if systemctl list-units --type=service | grep -qi "$service"; then
+ echo "停止 $service 服务..."
+ systemctl stop "$service" 2>/dev/null || true
+ systemctl disable "$service" 2>/dev/null || true
+ fi
+ done
+ 
+ # 杀死所有sk5/xray相关进程
+ echo "清理所有sk5/xray相关进程..."
+ pkill -9 sk5 2>/dev/null || true
+ pkill -9 xray 2>/dev/null || true
+ pkill -9 v2ray 2>/dev/null || true
+ sleep 2
+ 
+ # 检查并清理端口占用
+ echo "检查端口占用情况..."
+ if command -v ss >/dev/null 2>&1; then
+ for port in 40000 50000 48664 21359 1080 10808; do
+ OCCUPIED=$(ss -tulnp | grep ":$port ")
+ if [ -n "$OCCUPIED" ]; then
+ echo "发现端口 $port 被占用，正在清理..."
+ PID=$(echo "$OCCUPIED" | grep -oP '\d+(?=/\w+$)' | head -1)
+ if [ -n "$PID" ]; then
+ kill -9 "$PID" 2>/dev/null || true
+ fi
+ done
+ fi
+ 
+ sleep 2
+ echo "✓ 旧服务清理完成"
+ echo ""
+
  # ========== 1. 安装 sk5 主程序 ==========
  SK5_FILE_URL="https://github.com/55620/bot/raw/refs/heads/main/bangdingip/sk5"
  mkdir -p /usr/local/bin
@@ -77,44 +123,73 @@ EOF
  chmod +x /usr/local/bin/sk5
  echo "sk5 主程序已安装到 /usr/local/bin/sk5"
 
- # ========== 2. 内核网络优化（适合长时间打游戏 / 挂机） ==========
+ # ========== 2. 内核网络优化（游戏优化：低延迟、不掉线） ==========
  SOCKS_USER="FaCai"
  SOCKS_PASS="One99"
 
  add_sysctl_if_missing() {
  local key="$1" value="$2"
- grep -q "^${key}\s*=" /etc/sysctl.conf 2>/dev/null || echo "${key}=${value}" >> /etc/sysctl.conf
+ # 如果存在但值不同，先删除再添加
+ sed -i "/^${key}\s*=/d" /etc/sysctl.conf 2>/dev/null || true
+ echo "${key}=${value}" >> /etc/sysctl.conf
  }
 
- # 大缓冲，减少丢包
- add_sysctl_if_missing "net.core.rmem_max" "67108864"
- add_sysctl_if_missing "net.core.wmem_max" "67108864"
- add_sysctl_if_missing "net.core.rmem_default" "262144"
- add_sysctl_if_missing "net.core.wmem_default" "262144"
- add_sysctl_if_missing "net.core.netdev_max_backlog" "250000"
- add_sysctl_if_missing "net.core.somaxconn" "65535"
+ echo "=========================================="
+ echo "应用游戏优化网络参数（低延迟、不掉线）"
+ echo "=========================================="
 
- # TCP 低延迟
+ # 大缓冲，减少丢包（游戏优化）
+ add_sysctl_if_missing "net.core.rmem_max" "134217728"
+ add_sysctl_if_missing "net.core.wmem_max" "134217728"
+ add_sysctl_if_missing "net.core.rmem_default" "524288"
+ add_sysctl_if_missing "net.core.wmem_default" "524288"
+ add_sysctl_if_missing "net.core.netdev_max_backlog" "500000"
+ add_sysctl_if_missing "net.core.somaxconn" "65535"
+ add_sysctl_if_missing "net.core.netdev_budget" "600"
+
+ # TCP 低延迟优化（游戏专用）
  add_sysctl_if_missing "net.ipv4.tcp_fastopen" "3"
  add_sysctl_if_missing "net.ipv4.tcp_slow_start_after_idle" "0"
  add_sysctl_if_missing "net.ipv4.tcp_mtu_probing" "1"
  add_sysctl_if_missing "net.ipv4.tcp_sack" "1"
  add_sysctl_if_missing "net.ipv4.tcp_timestamps" "1"
+ add_sysctl_if_missing "net.ipv4.tcp_tw_reuse" "1"
+ add_sysctl_if_missing "net.ipv4.tcp_fin_timeout" "10"
+ add_sysctl_if_missing "net.ipv4.tcp_syn_retries" "3"
+ add_sysctl_if_missing "net.ipv4.tcp_synack_retries" "3"
+ add_sysctl_if_missing "net.ipv4.tcp_max_syn_backlog" "8192"
+ add_sysctl_if_missing "net.ipv4.tcp_max_tw_buckets" "2000000"
  add_sysctl_if_missing "net.ipv4.ip_forward" "1"
+ 
+ # TCP窗口缩放（提高吞吐量）
+ add_sysctl_if_missing "net.ipv4.tcp_window_scaling" "1"
+ add_sysctl_if_missing "net.ipv4.tcp_rmem" "4096 87380 134217728"
+ add_sysctl_if_missing "net.ipv4.tcp_wmem" "4096 65536 134217728"
 
- # 长连接保活（2 小时）
- add_sysctl_if_missing "net.ipv4.tcp_keepalive_time" "7200"
- add_sysctl_if_missing "net.ipv4.tcp_keepalive_intvl" "75"
- add_sysctl_if_missing "net.ipv4.tcp_keepalive_probes" "9"
+ # 长连接保活（游戏不掉线优化 - 1小时保活）
+ add_sysctl_if_missing "net.ipv4.tcp_keepalive_time" "3600"
+ add_sysctl_if_missing "net.ipv4.tcp_keepalive_intvl" "30"
+ add_sysctl_if_missing "net.ipv4.tcp_keepalive_probes" "5"
 
- # BBR（如果内核支持就打开）
+ # 连接跟踪优化（防止连接断开）
+ add_sysctl_if_missing "net.netfilter.nf_conntrack_max" "2000000"
+ add_sysctl_if_missing "net.netfilter.nf_conntrack_tcp_timeout_established" "3600"
+
+ # BBR拥塞控制（如果内核支持就打开，游戏低延迟）
  if sysctl net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -q bbr; then
  add_sysctl_if_missing "net.core.default_qdisc" "fq"
  add_sysctl_if_missing "net.ipv4.tcp_congestion_control" "bbr"
+ echo "✓ BBR拥塞控制已启用（低延迟优化）"
+ else
+ # 如果没有BBR，使用CUBIC优化
+ add_sysctl_if_missing "net.ipv4.tcp_congestion_control" "cubic"
+ echo "⚠ BBR不可用，使用CUBIC拥塞控制"
  fi
 
+ # 应用所有配置
  sysctl -p >/dev/null 2>&1 || true
- echo "内核网络参数优化完成。"
+ echo "✓ 内核网络参数优化完成（游戏优化：低延迟、不掉线）"
+ echo ""
 
  # ========== 3. 从 /root/ip.txt 读取公网 IP ==========
  IP_FILE="/root/ip.txt"
@@ -209,32 +284,47 @@ EOF
  systemctl daemon-reload
  echo "systemd 服务配置已更新（支持自动检测配置格式）。"
 
- # ========== 6. 生成 sk5 配置（优先使用JSON格式，确保端口正确监听） ==========
+ # ========== 6. 生成 sk5 配置（为每个IP创建独立的inbound，确保多IP都能工作） ==========
  mkdir -p /etc/sk5
  
- # 创建Xray标准JSON格式配置（主要配置）
+ # 创建Xray标准JSON格式配置（为每个IP创建独立的inbound）
+ # 这样每个IP都能独立工作，不会只有第一个IP通
+ echo "为 ${#pub_ips[@]} 个IP创建独立的socks5配置..."
+ 
+ # 构建JSON inbounds数组
+ INBOUNDS_JSON=""
+ IP_COUNT=0
+ for ip in "${pub_ips[@]}"; do
+ IP_COUNT=$((IP_COUNT + 1))
+ if [ $IP_COUNT -gt 1 ]; then
+ INBOUNDS_JSON="${INBOUNDS_JSON},"
+ fi
+ INBOUNDS_JSON="${INBOUNDS_JSON}
+    {
+      \"listen\": \"$ip\",
+      \"port\": $PORT,
+      \"protocol\": \"socks\",
+      \"settings\": {
+        \"auth\": \"password\",
+        \"accounts\": [
+          {
+            \"user\": \"$SOCKS_USER\",
+            \"pass\": \"$SOCKS_PASS\"
+          }
+        ],
+        \"udp\": true,
+        \"ip\": \"$ip\"
+      }
+    }"
+ done
+ 
+ # 创建JSON配置文件（多IP绑定）
  cat >/etc/sk5/config.json <<EOF
 {
   "log": {
     "loglevel": "warning"
   },
-  "inbounds": [
-    {
-      "listen": "0.0.0.0",
-      "port": $PORT,
-      "protocol": "socks",
-      "settings": {
-        "auth": "password",
-        "accounts": [
-          {
-            "user": "$SOCKS_USER",
-            "pass": "$SOCKS_PASS"
-          }
-        ],
-        "udp": true,
-        "ip": "0.0.0.0"
-      }
-    }
+  "inbounds": [$INBOUNDS_JSON
   ],
   "outbounds": [
     {
@@ -245,15 +335,34 @@ EOF
 }
 EOF
 
- # 同时创建TOML格式（作为备用）
- cat >/etc/sk5/serve.toml <<EOF
-[server]
-listen = "0.0.0.0:$PORT"
+ # 同时创建TOML格式（作为备用，包含所有IP）
+ TOML_CONTENT="# 多IP SOCKS5配置
+# 每个IP都有独立的server配置
+
+"
+ IP_COUNT=0
+ for ip in "${pub_ips[@]}"; do
+ IP_COUNT=$((IP_COUNT + 1))
+ TOML_CONTENT="${TOML_CONTENT}[server.ip${IP_COUNT}]
+listen = \"$ip:$PORT\"
 udp_enable = true
 
-[users]
-"$SOCKS_USER" = "$SOCKS_PASS"
-EOF
+[users.ip${IP_COUNT}]
+\"$SOCKS_USER\" = \"$SOCKS_PASS\"
+
+"
+ done
+ 
+ TOML_CONTENT="${TOML_CONTENT}# 默认配置（监听所有IP，作为备用）
+[server.default]
+listen = \"0.0.0.0:$PORT\"
+udp_enable = true
+
+[users.default]
+\"$SOCKS_USER\" = \"$SOCKS_PASS\"
+"
+ 
+ echo "$TOML_CONTENT" > /etc/sk5/serve.toml
 
  echo "sk5 配置文件已生成："
  echo "1. JSON格式（主要）：/etc/sk5/config.json"
@@ -295,17 +404,21 @@ EOF
  echo "⚠ 无法验证JSON格式（未安装python），请手动检查"
  fi
  
- # 验证配置文件中是否包含正确的端口
+ # 验证配置文件中是否包含正确的端口和所有IP
  if ! grep -q "\"port\": $PORT" /etc/sk5/config.json; then
  echo "✗ 错误：JSON配置文件中端口不正确！"
  exit 1
  fi
  
- if ! grep -q "listen = \"0.0.0.0:$PORT\"" /etc/sk5/serve.toml; then
- echo "⚠ 警告：TOML配置文件中端口可能不正确"
+ # 验证每个IP是否都在配置中
+ for ip in "${pub_ips[@]}"; do
+ if ! grep -q "\"listen\": \"$ip\"" /etc/sk5/config.json; then
+ echo "✗ 警告：IP $ip 未在JSON配置中找到"
  fi
+ done
  
  echo "✓ 配置文件验证完成"
+ echo "✓ 已为 ${#pub_ips[@]} 个IP创建独立的socks5配置"
 
  # ========== 7. 防火墙规则（完整配置，确保规则正确添加和持久化） ==========
  echo "=========================================="
@@ -566,25 +679,46 @@ EOF
  sleep 1
  done
 
- # 最终检查端口监听状态
+ # 最终检查端口监听状态（检查每个IP）
  echo ""
  echo "=========================================="
- echo "最终端口检查"
+ echo "最终端口检查（检查每个IP的监听状态）"
  echo "=========================================="
+ port_listening=false
+ IP_LISTEN_COUNT=0
+ 
+ for ip in "${pub_ips[@]}"; do
  if command -v ss >/dev/null 2>&1; then
- PORT_INFO=$(ss -tulnp | grep ":$PORT ")
+ IP_PORT_INFO=$(ss -tulnp | grep "$ip:$PORT ")
  elif command -v netstat >/dev/null 2>&1; then
- PORT_INFO=$(netstat -tulnp | grep ":$PORT ")
+ IP_PORT_INFO=$(netstat -tulnp | grep "$ip:$PORT ")
  fi
  
- if [ -n "$PORT_INFO" ]; then
- echo "✓ 端口 $PORT 正在监听："
- echo "$PORT_INFO"
+ if [ -n "$IP_PORT_INFO" ]; then
+ echo "✓ IP $ip 端口 $PORT 正在监听："
+ echo "  $IP_PORT_INFO"
+ IP_LISTEN_COUNT=$((IP_LISTEN_COUNT + 1))
  port_listening=true
  else
- echo "✗ 警告：未检测到端口 $PORT 监听"
- port_listening=false
+ echo "✗ IP $ip 端口 $PORT 未监听"
  fi
+ done
+ 
+ # 检查0.0.0.0监听（备用）
+ if command -v ss >/dev/null 2>&1; then
+ ALL_PORT_INFO=$(ss -tulnp | grep "0.0.0.0:$PORT ")
+ elif command -v netstat >/dev/null 2>&1; then
+ ALL_PORT_INFO=$(netstat -tulnp | grep "0.0.0.0:$PORT ")
+ fi
+ 
+ if [ -n "$ALL_PORT_INFO" ]; then
+ echo "✓ 0.0.0.0 端口 $PORT 正在监听（监听所有IP）："
+ echo "  $ALL_PORT_INFO"
+ port_listening=true
+ fi
+ 
+ echo ""
+ echo "监听统计：${IP_LISTEN_COUNT}/${#pub_ips[@]} 个IP正在监听端口 $PORT"
 
  # 如果端口未监听，显示详细诊断信息
  if [ "$port_listening" = false ]; then
@@ -649,64 +783,84 @@ EOF
  echo "✓ 端口监听正常，服务运行正常！"
  fi
 
- # ========== 9. 测试每个IP的连通性（优化：更准确的测试方法） ==========
+ # ========== 9. 测试每个IP的连通性（优化：测试每个IP的独立监听） ==========
  echo ""
  echo "=========================================="
- echo "测试各IP的连通性"
+ echo "测试各IP的连通性（每个IP独立测试）"
  echo "=========================================="
  
- # 首先检查本地端口是否监听
- LOCAL_LISTEN=false
+ # 检查每个IP的本地监听状态
+ echo "检查每个IP的本地监听状态..."
+ IP_LISTEN_STATUS=()
+ for ip in "${pub_ips[@]}"; do
  if command -v ss >/dev/null 2>&1; then
- if ss -tuln | grep -q "0.0.0.0:$PORT " || ss -tuln | grep -q ":::$PORT "; then
- LOCAL_LISTEN=true
+ if ss -tuln | grep -q "$ip:$PORT "; then
+ echo "✓ IP $ip 本地端口 $PORT 正在监听"
+ IP_LISTEN_STATUS+=("$ip:监听中")
+ else
+ echo "✗ IP $ip 本地端口 $PORT 未监听"
+ IP_LISTEN_STATUS+=("$ip:未监听")
  fi
  elif command -v netstat >/dev/null 2>&1; then
- if netstat -tuln | grep -q "0.0.0.0:$PORT "; then
- LOCAL_LISTEN=true
- fi
- fi
- 
- if [ "$LOCAL_LISTEN" = false ]; then
- echo "⚠ 警告：本地端口 $PORT 未监听，无法进行连通性测试"
- echo "请先确保服务正常运行并监听端口"
+ if netstat -tuln | grep -q "$ip:$PORT "; then
+ echo "✓ IP $ip 本地端口 $PORT 正在监听"
+ IP_LISTEN_STATUS+=("$ip:监听中")
  else
- echo "✓ 本地端口 $PORT 正在监听，开始测试外部IP连通性..."
+ echo "✗ IP $ip 本地端口 $PORT 未监听"
+ IP_LISTEN_STATUS+=("$ip:未监听")
+ fi
+ fi
+ done
  echo ""
+ 
+ # 测试外部连通性
+ echo "测试外部IP连通性（从服务器内部测试）..."
+ SUCCESS_COUNT=0
+ FAIL_COUNT=0
  
  for ip in "${pub_ips[@]}"; do
  echo -n "测试 $ip:$PORT ... "
  
- # 方法1: 使用bash内置TCP测试
+ # 方法1: 使用bash内置TCP测试（从服务器内部测试）
  if timeout 3 bash -c "echo > /dev/tcp/$ip/$PORT" 2>/dev/null; then
  echo "✓ 连接成功"
+ SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
  continue
  fi
  
  # 方法2: 使用nc (netcat) 测试
  if command -v nc >/dev/null 2>&1; then
- if timeout 3 nc -z -v "$ip" "$PORT" 2>&1 | grep -q "succeeded\|open"; then
+ if timeout 3 nc -z "$ip" "$PORT" 2>/dev/null; then
  echo "✓ 连接成功（使用nc测试）"
- continue
- fi
- fi
- 
- # 方法3: 使用telnet测试
- if command -v telnet >/dev/null 2>&1; then
- if timeout 3 bash -c "echo 'quit' | telnet $ip $PORT 2>&1" | grep -q "Connected\|Escape"; then
- echo "✓ 连接成功（使用telnet测试）"
+ SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
  continue
  fi
  fi
  
  # 如果所有方法都失败
  echo "✗ 连接失败"
+ FAIL_COUNT=$((FAIL_COUNT + 1))
  echo "  可能原因："
- echo "    - 云服务商安全组未开放端口 $PORT"
+ echo "    - 云服务商安全组未开放端口 $PORT（需要为每个IP单独开放）"
  echo "    - 服务器防火墙未开放端口 $PORT"
- echo "    - 服务未绑定到该IP地址"
- echo "    - 网络路由问题"
+ echo "    - 服务未正确绑定到该IP地址"
+ echo "    - IP地址未正确绑定到网卡"
  done
+ 
+ echo ""
+ echo "=========================================="
+ echo "连通性测试结果汇总"
+ echo "=========================================="
+ echo "成功：$SUCCESS_COUNT/${#pub_ips[@]} 个IP"
+ echo "失败：$FAIL_COUNT/${#pub_ips[@]} 个IP"
+ echo ""
+ 
+ if [ $FAIL_COUNT -gt 0 ]; then
+ echo "⚠ 部分IP连接失败，请检查："
+ echo "1. 云服务商安全组：确保为每个IP都开放了端口 $PORT"
+ echo "2. 服务器防火墙：确保端口 $PORT 已开放"
+ echo "3. IP绑定：运行 'ip addr show' 检查每个IP是否已绑定到网卡"
+ echo "4. 服务配置：检查 /etc/sk5/config.json 中每个IP的配置"
  fi
 
  # ========== 10. 最终输出：公网IP|统一端口|FaCai|One99 ==========
