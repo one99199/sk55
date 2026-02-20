@@ -177,7 +177,27 @@ EOF
  echo "使用随机端口：$PORT（40000-65000范围，共25000个端口可选）"
  fi
 
- # ========== 5. 写 systemd 服务（修复：确保服务正确启动） ==========
+ # ========== 5. 写 systemd 服务（修复：确保服务正确启动，支持多种配置格式） ==========
+ # 创建启动脚本，自动检测可用的配置格式
+ cat >/usr/local/bin/sk5-start.sh <<'SK5START'
+#!/bin/bash
+CONFIG_TOML="/etc/sk5/serve.toml"
+CONFIG_JSON="/etc/sk5/config.json"
+
+# 优先尝试TOML格式
+if [ -f "$CONFIG_TOML" ]; then
+    /usr/local/bin/sk5 -c "$CONFIG_TOML"
+# 如果TOML不存在，尝试JSON格式
+elif [ -f "$CONFIG_JSON" ]; then
+    /usr/local/bin/sk5 -c "$CONFIG_JSON"
+else
+    echo "错误：未找到配置文件！"
+    exit 1
+fi
+SK5START
+
+ chmod +x /usr/local/bin/sk5-start.sh
+
  cat >/etc/systemd/system/sk5.service <<EOF
 [Unit]
 Description=SOCKS5 Proxy Server (sk5)
@@ -186,7 +206,7 @@ After=network.target
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/local/bin/sk5 -c /etc/sk5/serve.toml
+ExecStart=/usr/local/bin/sk5-start.sh
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -197,12 +217,12 @@ WantedBy=multi-user.target
 EOF
 
  systemctl daemon-reload
- echo "systemd 服务配置已更新。"
+ echo "systemd 服务配置已更新（支持自动检测配置格式）。"
 
- # ========== 6. 生成 sk5 配置（监听 0.0.0.0:PORT，支持 UDP，修复：确保绑定所有IP） ==========
+ # ========== 6. 生成 sk5 配置（使用Xray标准JSON格式，确保端口正确监听） ==========
  mkdir -p /etc/sk5
  
- # 尝试使用TOML格式（sk5可能支持）
+ # 首先尝试TOML格式（如果sk5支持）
  cat >/etc/sk5/serve.toml <<EOF
 [server]
 listen = "0.0.0.0:$PORT"
@@ -212,26 +232,70 @@ udp_enable = true
 "$SOCKS_USER" = "$SOCKS_PASS"
 EOF
 
- echo "sk5 配置文件已生成：/etc/sk5/serve.toml"
- echo "配置内容："
+ # 同时创建Xray标准JSON格式配置（作为备用）
+ cat >/etc/sk5/config.json <<EOF
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "listen": "0.0.0.0",
+      "port": $PORT,
+      "protocol": "socks",
+      "settings": {
+        "auth": "password",
+        "accounts": [
+          {
+            "user": "$SOCKS_USER",
+            "pass": "$SOCKS_PASS"
+          }
+        ],
+        "udp": true,
+        "ip": "0.0.0.0"
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom"
+    }
+  ]
+}
+EOF
+
+ echo "sk5 配置文件已生成："
+ echo "1. TOML格式：/etc/sk5/serve.toml"
+ echo "2. JSON格式：/etc/sk5/config.json"
+ echo ""
+ echo "TOML配置内容："
  cat /etc/sk5/serve.toml
+ echo ""
+ echo "JSON配置内容："
+ cat /etc/sk5/config.json
  echo ""
  
  # 验证配置文件是否存在且可读
  if [ ! -f /etc/sk5/serve.toml ]; then
- echo "错误：配置文件创建失败！"
+ echo "错误：TOML配置文件创建失败！"
+ exit 1
+ fi
+ 
+ if [ ! -f /etc/sk5/config.json ]; then
+ echo "错误：JSON配置文件创建失败！"
  exit 1
  fi
  
  # 验证配置文件中是否包含正确的端口
- if ! grep -q "listen = \"0.0.0.0:$PORT\"" /etc/sk5/serve.toml; then
+ if ! grep -q "listen = \"0.0.0.0:$PORT\"" /etc/sk5/serve.toml && ! grep -q "\"port\": $PORT" /etc/sk5/config.json; then
  echo "警告：配置文件中端口可能不正确，请检查！"
  fi
  
- # 验证配置文件格式（检查基本语法）
- if ! grep -q "\[server\]" /etc/sk5/serve.toml || ! grep -q "listen" /etc/sk5/serve.toml; then
- echo "错误：配置文件格式不正确！"
- exit 1
+ # 验证JSON格式是否正确
+ if command -v python3 >/dev/null 2>&1; then
+ if ! python3 -m json.tool /etc/sk5/config.json >/dev/null 2>&1; then
+ echo "警告：JSON配置文件格式可能不正确！"
+ fi
  fi
 
  # ========== 7. 防火墙规则（完整配置，确保规则正确添加和持久化） ==========
@@ -377,49 +441,95 @@ EOF
  echo "防火墙规则配置完成"
  echo "=========================================="
 
- # ========== 8. 启动 sk5 服务（修复：增加启动检查和重试，多次检查端口监听） ==========
+ # ========== 8. 启动 sk5 服务（优化：增强启动检查，自动诊断和修复） ==========
+ echo "=========================================="
+ echo "启动 sk5 服务"
+ echo "=========================================="
+ 
  echo "停止旧服务（如果存在）..."
  systemctl stop sk5 >/dev/null 2>&1 || true
+ sleep 3
+
+ # 检查端口是否被其他进程占用
+ echo "检查端口 $PORT 是否被占用..."
+ if command -v ss >/dev/null 2>&1; then
+ PORT_OCCUPIED=$(ss -tulnp | grep ":$PORT " | head -1)
+ elif command -v netstat >/dev/null 2>&1; then
+ PORT_OCCUPIED=$(netstat -tulnp | grep ":$PORT " | head -1)
+ fi
+ 
+ if [ -n "$PORT_OCCUPIED" ]; then
+ echo "警告：端口 $PORT 已被占用："
+ echo "$PORT_OCCUPIED"
+ echo "尝试释放端口..."
+ # 尝试杀死占用端口的进程（谨慎操作）
+ PID=$(echo "$PORT_OCCUPIED" | grep -oP '\d+(?=/\w+$)' | head -1)
+ if [ -n "$PID" ] && [ "$PID" != "$$" ]; then
+ echo "发现占用端口的进程 PID: $PID"
+ read -t 5 -p "是否杀死该进程？(y/N，5秒后自动跳过): " KILL_PROC || KILL_PROC="n"
+ if [ "$KILL_PROC" = "y" ] || [ "$KILL_PROC" = "Y" ]; then
+ kill -9 "$PID" 2>/dev/null && echo "已杀死进程 $PID" || echo "无法杀死进程 $PID"
  sleep 2
+ fi
+ fi
+ fi
 
  echo "启动 sk5 服务..."
  systemctl start sk5
 
- echo "等待服务启动（最多等待10秒）..."
+ echo "等待服务启动（最多等待15秒）..."
  
- # 等待服务启动，最多等待10秒
- for i in {1..10}; do
+ # 等待服务启动，最多等待15秒
+ service_started=false
+ for i in {1..15}; do
  if systemctl is-active --quiet sk5; then
  echo "✓ sk5 服务进程已启动（等待 $i 秒）"
+ service_started=true
  break
  fi
  sleep 1
  done
 
  # 检查服务状态
- if systemctl is-active --quiet sk5; then
+ if [ "$service_started" = true ]; then
  echo "✓ sk5 服务已成功启动"
  else
  echo "✗ sk5 服务启动失败，查看日志："
- systemctl status sk5 --no-pager -l
+ systemctl status sk5 --no-pager -l | head -30
  echo ""
- echo "尝试查看详细错误："
+ echo "最近的服务日志："
  journalctl -u sk5 -n 30 --no-pager
- exit 1
+ echo ""
+ echo "尝试使用JSON配置格式重启..."
+ # 尝试使用JSON配置
+ if [ -f /etc/sk5/config.json ]; then
+ echo "修改systemd服务使用JSON配置..."
+ sed -i 's|ExecStart=.*|ExecStart=/usr/local/bin/sk5 -c /etc/sk5/config.json|' /etc/systemd/system/sk5.service
+ systemctl daemon-reload
+ systemctl restart sk5
+ sleep 5
+ if systemctl is-active --quiet sk5; then
+ echo "✓ 使用JSON配置后服务启动成功"
+ service_started=true
+ else
+ echo "✗ 使用JSON配置后服务仍启动失败"
+ fi
+ fi
  fi
 
- # 等待端口监听（最多等待15秒）
- echo "等待端口 $PORT 开始监听（最多等待15秒）..."
+ # 等待端口监听（最多等待20秒）
+ echo ""
+ echo "等待端口 $PORT 开始监听（最多等待20秒）..."
  port_listening=false
- for i in {1..15}; do
+ for i in {1..20}; do
  if command -v ss >/dev/null 2>&1; then
- if ss -tuln | grep -q ":$PORT "; then
+ if ss -tulnp | grep -q ":$PORT " && ss -tulnp | grep ":$PORT " | grep -qE "sk5|xray"; then
  echo "✓ 端口 $PORT 已开始监听（等待 $i 秒）"
  port_listening=true
  break
  fi
  elif command -v netstat >/dev/null 2>&1; then
- if netstat -tuln | grep -q ":$PORT "; then
+ if netstat -tulnp | grep -q ":$PORT " && netstat -tulnp | grep ":$PORT " | grep -qE "sk5|xray"; then
  echo "✓ 端口 $PORT 已开始监听（等待 $i 秒）"
  port_listening=true
  break
@@ -430,67 +540,133 @@ EOF
 
  # 最终检查端口监听状态
  echo ""
- echo "检查端口监听状态..."
+ echo "=========================================="
+ echo "最终端口检查"
+ echo "=========================================="
  if command -v ss >/dev/null 2>&1; then
- if ss -tuln | grep ":$PORT "; then
- echo "✓ 端口 $PORT 正在监听"
- port_listening=true
- else
- echo "✗ 警告：未检测到端口 $PORT 监听"
- echo "正在检查服务日志..."
- journalctl -u sk5 -n 20 --no-pager | tail -10
- fi
+ PORT_INFO=$(ss -tulnp | grep ":$PORT ")
  elif command -v netstat >/dev/null 2>&1; then
- if netstat -tuln | grep ":$PORT "; then
- echo "✓ 端口 $PORT 正在监听"
+ PORT_INFO=$(netstat -tulnp | grep ":$PORT ")
+ fi
+ 
+ if [ -n "$PORT_INFO" ]; then
+ echo "✓ 端口 $PORT 正在监听："
+ echo "$PORT_INFO"
  port_listening=true
  else
  echo "✗ 警告：未检测到端口 $PORT 监听"
- echo "正在检查服务日志..."
- journalctl -u sk5 -n 20 --no-pager | tail -10
- fi
+ port_listening=false
  fi
 
- # 如果端口未监听，显示诊断信息
+ # 如果端口未监听，显示详细诊断信息
  if [ "$port_listening" = false ]; then
  echo ""
  echo "=========================================="
- echo "诊断信息："
+ echo "详细诊断信息"
  echo "=========================================="
- echo "1. 检查配置文件："
+ echo "1. 服务状态："
+ systemctl status sk5 --no-pager -l | head -25
+ echo ""
+ echo "2. 配置文件（TOML）："
+ if [ -f /etc/sk5/serve.toml ]; then
  cat /etc/sk5/serve.toml
- echo ""
- echo "2. 检查服务状态："
- systemctl status sk5 --no-pager -l | head -20
- echo ""
- echo "3. 检查进程："
- ps aux | grep -E "sk5|xray" | grep -v grep || echo "未找到sk5进程"
- echo ""
- echo "4. 检查所有监听端口："
- if command -v ss >/dev/null 2>&1; then
- ss -tuln | head -20
  else
- netstat -tuln | head -20
+ echo "TOML配置文件不存在"
  fi
  echo ""
- echo "如果端口仍未监听，请手动检查："
- echo "  - 配置文件格式是否正确：cat /etc/sk5/serve.toml"
- echo "  - 服务日志：journalctl -u sk5 -f"
- echo "  - sk5程序是否支持该配置格式"
+ echo "3. 配置文件（JSON）："
+ if [ -f /etc/sk5/config.json ]; then
+ cat /etc/sk5/config.json
+ else
+ echo "JSON配置文件不存在"
+ fi
+ echo ""
+ echo "4. 服务进程："
+ ps aux | grep -E "sk5|xray" | grep -v grep || echo "未找到sk5/xray进程"
+ echo ""
+ echo "5. 所有监听端口："
+ if command -v ss >/dev/null 2>&1; then
+ ss -tulnp | head -30
+ else
+ netstat -tulnp | head -30
+ fi
+ echo ""
+ echo "6. 最近的服务日志（最后50行）："
+ journalctl -u sk5 -n 50 --no-pager
+ echo ""
  echo "=========================================="
+ echo "建议的修复步骤："
+ echo "=========================================="
+ echo "1. 检查sk5程序是否支持当前配置格式"
+ echo "2. 尝试手动运行：/usr/local/bin/sk5 -c /etc/sk5/serve.toml"
+ echo "3. 或尝试：/usr/local/bin/sk5 -c /etc/sk5/config.json"
+ echo "4. 查看详细日志：journalctl -u sk5 -f"
+ echo "5. 检查sk5程序版本和帮助：/usr/local/bin/sk5 --help"
+ echo "=========================================="
+ else
+ echo ""
+ echo "✓ 端口监听正常，服务运行正常！"
  fi
 
- # ========== 9. 测试每个IP的连通性 ==========
+ # ========== 9. 测试每个IP的连通性（优化：更准确的测试方法） ==========
  echo ""
- echo "测试各IP的连通性..."
+ echo "=========================================="
+ echo "测试各IP的连通性"
+ echo "=========================================="
+ 
+ # 首先检查本地端口是否监听
+ LOCAL_LISTEN=false
+ if command -v ss >/dev/null 2>&1; then
+ if ss -tuln | grep -q "0.0.0.0:$PORT " || ss -tuln | grep -q ":::$PORT "; then
+ LOCAL_LISTEN=true
+ fi
+ elif command -v netstat >/dev/null 2>&1; then
+ if netstat -tuln | grep -q "0.0.0.0:$PORT "; then
+ LOCAL_LISTEN=true
+ fi
+ fi
+ 
+ if [ "$LOCAL_LISTEN" = false ]; then
+ echo "⚠ 警告：本地端口 $PORT 未监听，无法进行连通性测试"
+ echo "请先确保服务正常运行并监听端口"
+ else
+ echo "✓ 本地端口 $PORT 正在监听，开始测试外部IP连通性..."
+ echo ""
+ 
  for ip in "${pub_ips[@]}"; do
  echo -n "测试 $ip:$PORT ... "
+ 
+ # 方法1: 使用bash内置TCP测试
  if timeout 3 bash -c "echo > /dev/tcp/$ip/$PORT" 2>/dev/null; then
  echo "✓ 连接成功"
- else
- echo "✗ 连接失败（可能防火墙未开放或服务未绑定该IP）"
+ continue
  fi
+ 
+ # 方法2: 使用nc (netcat) 测试
+ if command -v nc >/dev/null 2>&1; then
+ if timeout 3 nc -z -v "$ip" "$PORT" 2>&1 | grep -q "succeeded\|open"; then
+ echo "✓ 连接成功（使用nc测试）"
+ continue
+ fi
+ fi
+ 
+ # 方法3: 使用telnet测试
+ if command -v telnet >/dev/null 2>&1; then
+ if timeout 3 bash -c "echo 'quit' | telnet $ip $PORT 2>&1" | grep -q "Connected\|Escape"; then
+ echo "✓ 连接成功（使用telnet测试）"
+ continue
+ fi
+ fi
+ 
+ # 如果所有方法都失败
+ echo "✗ 连接失败"
+ echo "  可能原因："
+ echo "    - 云服务商安全组未开放端口 $PORT"
+ echo "    - 服务器防火墙未开放端口 $PORT"
+ echo "    - 服务未绑定到该IP地址"
+ echo "    - 网络路由问题"
  done
+ fi
 
  # ========== 10. 最终输出：公网IP|统一端口|FaCai|One99 ==========
  echo ""
