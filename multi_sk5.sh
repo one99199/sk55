@@ -97,12 +97,24 @@ EOF
  echo "检查端口占用情况..."
  if command -v ss >/dev/null 2>&1; then
  for port in 40000 50000 48664 21359 1080 10808; do
- OCCUPIED=$(ss -tulnp | grep ":$port ")
+ OCCUPIED=$(ss -tulnp 2>/dev/null | grep ":$port " || true)
  if [ -n "$OCCUPIED" ]; then
  echo "发现端口 $port 被占用，正在清理..."
- PID=$(echo "$OCCUPIED" | grep -oP '\d+(?=/\w+$)' | head -1)
- if [ -n "$PID" ]; then
+ PID=$(echo "$OCCUPIED" | awk '{print $NF}' | cut -d'/' -f1 | head -1)
+ if [ -n "$PID" ] && [ "$PID" != "-" ] && [ "$PID" != "Address" ]; then
  kill -9 "$PID" 2>/dev/null || true
+ fi
+ fi
+ done
+ elif command -v netstat >/dev/null 2>&1; then
+ for port in 40000 50000 48664 21359 1080 10808; do
+ OCCUPIED=$(netstat -tulnp 2>/dev/null | grep ":$port " || true)
+ if [ -n "$OCCUPIED" ]; then
+ echo "发现端口 $port 被占用，正在清理..."
+ PID=$(echo "$OCCUPIED" | awk '{print $7}' | cut -d'/' -f1 | head -1)
+ if [ -n "$PID" ] && [ "$PID" != "-" ] && [ "$PID" != "Address" ]; then
+ kill -9 "$PID" 2>/dev/null || true
+ fi
  fi
  done
  fi
