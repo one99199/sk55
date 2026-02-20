@@ -71,7 +71,7 @@ EOF
  echo "=========================================="
  
  # 停止sk5服务
- if systemctl list-units --type=service | grep -q "sk5.service"; then
+ if systemctl list-units --type=service 2>/dev/null | grep -q "sk5.service"; then
  echo "停止 sk5 服务..."
  systemctl stop sk5 2>/dev/null || true
  systemctl disable sk5 2>/dev/null || true
@@ -79,7 +79,7 @@ EOF
  
  # 停止其他可能的socks5服务
  for service in socks5 xray v2ray trojan shadowsocks ss-redir; do
- if systemctl list-units --type=service | grep -qi "$service"; then
+ if systemctl list-units --type=service 2>/dev/null | grep -qi "$service"; then
  echo "停止 $service 服务..."
  systemctl stop "$service" 2>/dev/null || true
  systemctl disable "$service" 2>/dev/null || true
@@ -475,7 +475,7 @@ udp_enable = true
  echo "  ✗ 警告：UDP 端口 $PORT 规则未生效"
  fi
 
- elif command -v ufw >/dev/null 2>&1 && (systemctl is-active --quiet ufw 2>/dev/null || ufw status | grep -q "Status: active"); then
+ elif command -v ufw >/dev/null 2>&1 && (systemctl is-active --quiet ufw 2>/dev/null || ufw status 2>/dev/null | grep -q "Status: active"); then
  echo "检测到 ufw，添加防火墙规则..."
  
  # 添加TCP端口
@@ -493,13 +493,13 @@ udp_enable = true
  fi
  
  # 验证规则
- if ufw status | grep -q "$PORT/tcp"; then
+ if ufw status 2>/dev/null | grep -q "$PORT/tcp"; then
  echo "  ✓ 验证：TCP 端口 $PORT 规则已生效"
  else
  echo "  ✗ 警告：TCP 端口 $PORT 规则未生效"
  fi
  
- if ufw status | grep -q "$PORT/udp"; then
+ if ufw status 2>/dev/null | grep -q "$PORT/udp"; then
  echo "  ✓ 验证：UDP 端口 $PORT 规则已生效"
  else
  echo "  ✗ 警告：UDP 端口 $PORT 规则未生效"
@@ -587,9 +587,9 @@ udp_enable = true
  # 检查端口是否被其他进程占用
  echo "检查端口 $PORT 是否被占用..."
  if command -v ss >/dev/null 2>&1; then
- PORT_OCCUPIED=$(ss -tulnp | grep ":$PORT " | head -1)
+ PORT_OCCUPIED=$(ss -tulnp 2>/dev/null | grep ":$PORT " | head -1)
  elif command -v netstat >/dev/null 2>&1; then
- PORT_OCCUPIED=$(netstat -tulnp | grep ":$PORT " | head -1)
+ PORT_OCCUPIED=$(netstat -tulnp 2>/dev/null | grep ":$PORT " | head -1)
  fi
  
  if [ -n "$PORT_OCCUPIED" ]; then
@@ -597,8 +597,8 @@ udp_enable = true
  echo "$PORT_OCCUPIED"
  echo "尝试释放端口..."
  # 尝试杀死占用端口的进程（谨慎操作）
- PID=$(echo "$PORT_OCCUPIED" | grep -oP '\d+(?=/\w+$)' | head -1)
- if [ -n "$PID" ] && [ "$PID" != "$$" ]; then
+ PID=$(echo "$PORT_OCCUPIED" | awk '{print $NF}' | cut -d'/' -f1 | head -1)
+ if [ -n "$PID" ] && [ "$PID" != "$$" ] && [ "$PID" != "-" ] && [ "$PID" != "Address" ]; then
  echo "发现占用端口的进程 PID: $PID"
  read -t 5 -p "是否杀死该进程？(y/N，5秒后自动跳过): " KILL_PROC || KILL_PROC="n"
  if [ "$KILL_PROC" = "y" ] || [ "$KILL_PROC" = "Y" ]; then
@@ -660,7 +660,7 @@ udp_enable = true
  port_listening=false
  for i in {1..30}; do
  if command -v ss >/dev/null 2>&1; then
- PORT_CHECK=$(ss -tulnp | grep ":$PORT ")
+ PORT_CHECK=$(ss -tulnp 2>/dev/null | grep ":$PORT ")
  if [ -n "$PORT_CHECK" ]; then
  # 检查是否是sk5或xray进程
  if echo "$PORT_CHECK" | grep -qE "sk5|xray"; then
@@ -675,7 +675,7 @@ udp_enable = true
  fi
  fi
  elif command -v netstat >/dev/null 2>&1; then
- PORT_CHECK=$(netstat -tulnp | grep ":$PORT ")
+ PORT_CHECK=$(netstat -tulnp 2>/dev/null | grep ":$PORT ")
  if [ -n "$PORT_CHECK" ]; then
  if echo "$PORT_CHECK" | grep -qE "sk5|xray"; then
  echo "✓ 端口 $PORT 已开始监听（等待 $i 秒）"
@@ -701,9 +701,9 @@ udp_enable = true
  
  for ip in "${pub_ips[@]}"; do
  if command -v ss >/dev/null 2>&1; then
- IP_PORT_INFO=$(ss -tulnp | grep "$ip:$PORT ")
+ IP_PORT_INFO=$(ss -tulnp 2>/dev/null | grep "$ip:$PORT ")
  elif command -v netstat >/dev/null 2>&1; then
- IP_PORT_INFO=$(netstat -tulnp | grep "$ip:$PORT ")
+ IP_PORT_INFO=$(netstat -tulnp 2>/dev/null | grep "$ip:$PORT ")
  fi
  
  if [ -n "$IP_PORT_INFO" ]; then
@@ -718,9 +718,9 @@ udp_enable = true
  
  # 检查0.0.0.0监听（备用）
  if command -v ss >/dev/null 2>&1; then
- ALL_PORT_INFO=$(ss -tulnp | grep "0.0.0.0:$PORT ")
+ ALL_PORT_INFO=$(ss -tulnp 2>/dev/null | grep "0.0.0.0:$PORT ")
  elif command -v netstat >/dev/null 2>&1; then
- ALL_PORT_INFO=$(netstat -tulnp | grep "0.0.0.0:$PORT ")
+ ALL_PORT_INFO=$(netstat -tulnp 2>/dev/null | grep "0.0.0.0:$PORT ")
  fi
  
  if [ -n "$ALL_PORT_INFO" ]; then
