@@ -14,51 +14,48 @@ SOCKS_PASS="One99"
 SOCKS_PORT=40001
 EXPIRE_DATE=$(date -d "+45 days" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || date -v+45d "+%Y-%m-%d %H:%M:%S" 2>/dev/null)
 OUTPUT_FILE="/root/proxy_list.txt"
-# 未自动检测到公网 IP 时使用的列表（如云厂商未把公网 IP 绑到网卡，可在此写死并绑定）
-FALLBACK_PUBLIC_IPS=( "47.242.215.214" "47.243.85.225" "8.217.67.31" )
+# 内网 IP -> 公网 IP 对应（3 个内网 IP 通常在 3 个网卡上）
+declare -A INNER_TO_PUBLIC=(
+    ["172.17.30.89"]="47.242.215.214"
+    ["172.17.30.91"]="47.243.85.225"
+    ["172.17.30.94"]="8.217.67.31"
+)
+USE_PYTHON_SOCKS=0
 
-# ---------- 网卡 ----------
-IFACE=$(ip -4 route show default 2>/dev/null | awk '/default/ {print $5; exit}' || echo "eth0")
-
-# ---------- 公网 IP 自动检测：从网卡取非内网 IPv4 ----------
-is_private_ip() {
-    local ip="$1"
-    [[ "$ip" =~ ^127\. ]] && return 0
-    [[ "$ip" =~ ^10\. ]] && return 0
-    [[ "$ip" =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. ]] && return 0
-    [[ "$ip" =~ ^192\.168\. ]] && return 0
-    return 1
-}
-get_public_ips_auto() {
-    local list=()
-    while read -r line; do
-        if [[ "$line" =~ inet[^6]\ ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/ ]]; then
-            ip="${BASH_REMATCH[1]}"
-            is_private_ip "$ip" || list+=( "$ip" )
-        fi
-    done < <(ip -4 addr show dev "$IFACE" 2>/dev/null)
-    echo "${list[@]}"
+# ---------- 遍历所有网卡，按内网 IP 找到对应网卡并绑定公网 IP ----------
+# 找出哪个网卡上有哪个内网 IP
+get_iface_for_ip() {
+    local want="$1"
+    local iface
+    for iface in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -v '^lo$'); do
+        ip -4 addr show dev "$iface" 2>/dev/null | grep -qF "inet $want/" && { echo "$iface"; return; }
+    done
+    echo ""
 }
 
-# 决定最终使用的公网 IP 列表
-AUTO_IPS=( $(get_public_ips_auto) )
-if [ ${#AUTO_IPS[@]} -gt 0 ]; then
-    PUBLIC_IPS=( "${AUTO_IPS[@]}" )
-    echo "[0] 已从网卡 $IFACE 自动检测到公网 IP: ${PUBLIC_IPS[*]}"
-else
-    PUBLIC_IPS=( "${FALLBACK_PUBLIC_IPS[@]}" )
-    echo "[0] 未检测到公网 IP，使用配置列表并尝试绑定: ${PUBLIC_IPS[*]}"
-fi
+# 固定顺序：内网 89->214, 91->225, 94->31
+ORDERED_INNER=( "172.17.30.89" "172.17.30.91" "172.17.30.94" )
+PUBLIC_IPS=()
+DEFAULT_IFACE=$(ip -4 route show default 2>/dev/null | awk '/default/ {print $5; exit}' || echo "eth0")
 
-# ---------- 1. 绑定公网 IP（仅 FALLBACK 场景：未在网卡上的才执行 add） ----------
-echo "[1/4] 绑定/确认公网 IP 到 $IFACE"
-for ip in "${PUBLIC_IPS[@]}"; do
-    if ip addr show "$IFACE" 2>/dev/null | grep -qF "$ip"; then
-        echo "  已存在 $ip"
+echo "[0] 检测网卡与内网 IP（3 内网 -> 3 网卡 -> 绑定 3 公网）"
+for inner in "${ORDERED_INNER[@]}"; do
+    pub="${INNER_TO_PUBLIC[$inner]}"
+    iface=$(get_iface_for_ip "$inner")
+    if [ -z "$iface" ]; then
+        iface="$DEFAULT_IFACE"
+        echo "  内网 $inner 未在任一网卡找到，使用默认网卡 $iface -> 公网 $pub"
     else
-        ip addr add "$ip/32" dev "$IFACE" 2>/dev/null && echo "  已添加 $ip" || echo "  添加 $ip 失败(无权限或该 IP 未归属本机)"
+        echo "  内网 $inner -> 网卡 $iface -> 公网 $pub"
     fi
+    if ! ip addr show "$iface" 2>/dev/null | grep -qF "$pub"; then
+        ip addr add "$pub/32" dev "$iface" 2>/dev/null && echo "    已绑定 $pub 到 $iface" || echo "    绑定 $pub 失败(无权限或 IP 未归属本机)"
+    else
+        echo "    $pub 已在 $iface 上"
+    fi
+    PUBLIC_IPS+=( "$pub" )
 done
+echo "[1/4] 公网 IP 列表: ${PUBLIC_IPS[*]}"
 
 # ---------- 2. 游戏/长连接/防封 内核优化 ----------
 echo "[2/4] 内核参数优化（延迟低、不掉线、行为像正常 TCP）"
@@ -108,7 +105,7 @@ daemon
 auth strong
 users ${SOCKS_USER}:CL:${SOCKS_PASS}
 allow ${SOCKS_USER}
-proxy -p${SOCKS_PORT} -i0.0.0.0 -e0.0.0.0
+socks -p${SOCKS_PORT} -i0.0.0.0 -e0.0.0.0 -u2
 EOF
     pkill 3proxy 2>/dev/null || true
     sleep 1
@@ -179,30 +176,43 @@ if command -v 3proxy &>/dev/null; then
 elif command -v yum &>/dev/null && yum install -y 3proxy 2>/dev/null; then
     start_3proxy
 else
+    USE_PYTHON_SOCKS=1
     start_python_socks
 fi
 
-# 等待服务就绪
-sleep 2
+# 等待端口就绪（3proxy 以 daemon 启动需稍等）
+wait_for_port() {
+    local i=0
+    while [ $i -lt 10 ]; do
+        if ss -tlnp 2>/dev/null | grep -q ":${SOCKS_PORT} "; then
+            return 0
+        fi
+        sleep 1
+        i=$((i+1))
+    done
+    return 1
+}
+wait_for_port && echo "  端口 $SOCKS_PORT 已监听" || echo "  等待端口超时，请稍后执行: ss -tlnp | grep $SOCKS_PORT"
 
 # ---------- 4. 连通性自检（本机） ----------
 echo "[4/4] 连通性自检"
 check_local() {
-    # 用 curl 走 SOCKS5 测本机
+    if ss -tlnp 2>/dev/null | grep -q ":${SOCKS_PORT} "; then
+        echo "  本机端口 $SOCKS_PORT: 已监听"
+    else
+        echo "  本机端口 $SOCKS_PORT: 未监听 (请检查 3proxy 是否运行: ps aux | grep 3proxy)"
+        return 1
+    fi
     if command -v curl &>/dev/null; then
-        if curl -s -x "socks5://${SOCKS_USER}:${SOCKS_PASS}@127.0.0.1:${SOCKS_PORT}" --connect-timeout 5 -o /dev/null -w "%{http_code}" "https://www.gstatic.com/generate_204" 2>/dev/null | grep -q 204; then
-            echo "  本机 SOCKS5 连通: 正常 (curl 经代理访问外网成功)"
+        if curl -s -x "socks5://${SOCKS_USER}:${SOCKS_PASS}@127.0.0.1:${SOCKS_PORT}" --connect-timeout 8 -o /dev/null -w "%{http_code}" "https://www.gstatic.com/generate_204" 2>/dev/null | grep -q 204; then
+            echo "  本机 SOCKS5 代理: 正常 (curl 经代理访问外网成功)"
             return 0
         fi
+        echo "  本机 SOCKS5 代理: curl 测试未通过 (请检查账号密码或 3proxy 配置)"
     fi
-    # 无 curl 或失败时用 nc 测端口
-    if command -v nc &>/dev/null; then
-        if nc -z -w2 127.0.0.1 $SOCKS_PORT 2>/dev/null; then
-            echo "  本机 SOCKS5 端口: 已监听 (建议用 curl 或客户端再测一次认证)"
-            return 0
-        fi
+    if [ "$USE_PYTHON_SOCKS" = 1 ]; then
+        echo "  若异常可查看: /var/log/socks5.log"
     fi
-    echo "  本机自检: 端口或代理未就绪，请检查 /var/log/socks5.log 或 3proxy 进程"
     return 1
 }
 check_local || true
